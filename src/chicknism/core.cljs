@@ -1,25 +1,21 @@
 (ns chicknism.core
     (:require [reagent.core :as reagent :refer [atom]]
-              [chickn.core :as chickn]))
+              [chickn.core :as chickn]
+              [chickn.util :refer [noop simple-printer]]))
 
 (enable-console-print!)
 
 
 ;; state
 
-(defonce app-state (atom {:cities {}
-                          :path []}))
+(declare app-state)
 
-;; chickn stuff
+(defn rand-chromo []
+  (let [chickn-cities (mapv (fn [[n [x y]]] {:name n :x x :y y}) (-> @app-state :cities))]
+    (shuffle chickn-cities)))
 
-(def cities [{:name :A :x 1 :y 1}
-             {:name :B :x 5 :y 1}
-             {:name :C :x 10 :y 1}
-             {:name :D :x 10 :y 5}
-             {:name :E :x 10 :y 10}
-             {:name :F :x 5 :y 10}
-             {:name :G :x 1 :y 10}
-             {:name :H :x 1 :y 5}])
+(defn rnd-index [coll]
+  (int (* (rand) (count coll))))
 
 (defn dist-squared [[{x1 :x y1 :y} {x2 :x y2 :y}]]
   (let [dx (- x1 x2)
@@ -29,15 +25,52 @@
 (defn fitness [cities]
   (apply + (map dist-squared (partition 2 1 cities))))
 
+
+(defonce app-state (atom {:genotype {}
+                          :cities {}
+                          :path []
+                          :token nil
+                          :state :reset
+                          :cfg #:chickn.core{:chromo-gen rand-chromo
+                                             :pop-size     300
+                                             :terminated? noop
+                                             ;:monitor     monitor
+                                             :monitor     noop
+                                             :fitness      fitness
+                                             :comparator   chickn/lower-is-better
+                                             :reporter     simple-printer
+                                             :selectors  [#:chickn.selectors{:type        :chickn.selectors/best
+                                                                             :elit        true
+                                                                             :rate        0.1
+                                                                             :random-func rand}
+                                                          #:chickn.selectors{:type        :chickn.selectors/roulette
+                                                                             :rate        0.3
+                                                                             :random-func rand}]
+                                             :operators    [#:chickn.operators{:type         :chickn.operators/ordered-crossover
+                                                                               :rate         0.3
+                                                                               :random-point (partial rnd-index (range 8))
+                                                                               :rand-nth     rand-nth}
+                                                            #:chickn.operators{:type        :chickn.operators/swap-mutation
+                                                                               :rate        0.1
+                                                                               :rand-nth    rnd-index
+                                                                               :random-func rand}]}}))
+
+;; chickn stuff
+
+#_(def cities [{:name :A :x 1 :y 1}
+             {:name :B :x 5 :y 1}
+             {:name :C :x 10 :y 1}
+             {:name :D :x 10 :y 5}
+             {:name :E :x 10 :y 10}
+             {:name :F :x 5 :y 10}
+             {:name :G :x 1 :y 10}
+             {:name :H :x 1 :y 5}])
+
 #_(defn init-pop [n]
     (repeatedly n #(shuffle cities)))
 
 (defn init-pop [n]
-  (let [chickn-cities (mapv (fn [[n [x y]]] {:name n :x x :y y}) (-> @app-state :cities))]
-    (repeatedly n #(shuffle chickn-cities))))
-
-(defn rnd-index [coll]
-  (int (* (rand) (count coll))))
+  (repeatedly n rand-chromo))
 
 (defn data-reporter [{:keys [iteration best-fitness best-chromo]}]
   (let [best-path (mapv :name best-chromo)]
@@ -45,28 +78,22 @@
     (if (= (mod iteration 20) 0)
       (swap! app-state assoc :path best-path))))
 
-(defn evolve []
-  (let [cfg #:chickn.core{:init-pop     #(chickn/raw-pop->pop (init-pop 30))
-                          :pop-size     30
-                          :rand-nth     rand-nth
-                          ;:random-point rnd-index
-                          :elitism-rate 0.1
-                          :terminated? (fn [c])
-                          :fitness      fitness
-                          :comparator   chickn/ascending
-                          :reporter     data-reporter
-                          :selector     #:chickn.selectors{:type        :chickn.selectors/roulette
-                                                           :random-func rand}
-                          :operators    [#:chickn.operators{:type         :chickn.operators/ordered-crossover
-                                                            :rate         0.3
-                                                            :random-point (partial rnd-index (range 8))
-                                                            :rand-nth     rand-nth}
-                                         #:chickn.operators{:type        :chickn.operators/swap-mutation
-                                                            :rate        0.1
-                                                            :rand-nth    rnd-index
-                                                            :random-func rand}]}]
-    (select-keys (chickn/evolve* cfg 500) [:solved? :time])))
+(defn evolve-once []
+  (let [[_ new-gen] (chickn.core/evolve (-> @app-state :cfg) (-> @app-state :genotype))
+        new-path (mapv :name (-> new-gen :best-chromo))]
+    (swap! app-state assoc :genotype new-gen :path new-path)))
 
+(defn evolve []
+  (swap! app-state assoc :token (js/setInterval evolve-once 1) :state :started)
+  #_(let [genotype (chickn/init cfg)]
+    (select-keys (chickn/evolve cfg genotype 500) [:solved? :time])))
+
+(defn stop []
+  (js/clearInterval (-> @app-state :token))
+  (swap! app-state assoc :token nil :state :stopped))
+
+
+;; ------------
 ;; webapp stuff
 
 (def width-max 760)
@@ -80,10 +107,15 @@
         y (+ 10 (rand-int (- height-max 10)))]
     {c [x y]}))
 
+(defn reset []
+  (swap! app-state assoc :state :reset :genotype {} :cities {} :path []))
+
 (defn init [n]
-  (let [cities (create-cities n)]
-    (swap! app-state assoc :cities (reduce (fn [a c] (merge (create-city-points c) a)) {} cities))
-    (swap! app-state assoc :path cities)))
+  (let [cities (create-cities n)
+        _ (swap! app-state assoc :cities (reduce (fn [a c] (merge (create-city-points c) a)) {} cities))
+        _ (swap! app-state assoc :path cities)
+        genotype (chickn.core/init (-> @app-state :cfg))]
+    (swap! app-state assoc :genotype genotype :state :stopped)))
 
 (def window-width (reagent/atom nil))
 
@@ -128,7 +160,7 @@
 
        :component-did-mount
        (fn [this]
-         (init 50)                                           ; hack!
+         #_(init 50)                                           ; hack!
          #_(path-shuffler)
          (reset! dom-node (reagent/dom-node this))
          )
@@ -140,8 +172,25 @@
           [:canvas (if-let [node @dom-node]
                      {:width (.-clientWidth node)
                       :height (.-clientHeight node)})]
-          [:input {:type "button" :value "Start!"
-                   :on-click #(evolve)}]])})))
+          [:div
+           [:p "Iteration: " (-> @app-state :genotype :iteration)]
+           [:p "Best fitness: " (-> @app-state :genotype :best-fitness)]]
+          [:input {:type "button" :value "Reset"
+                   :disabled (not (some (hash-set (-> @app-state :state)) [:stopped]))
+                   :on-click #(reset)}]
+          [:input {:type "button" :value "Init"
+                   :disabled (not (some (hash-set (-> @app-state :state)) [:reset]))
+                   :on-click #(init 50)}]
+          [:input {:type "button" :value "Evolve once"
+                   ; :disabled (not= :started (-> @app-state :state))
+                   :on-click #(evolve-once)}]
+          [:input {:type "button" :value "Start"
+                   ;:disabled (not= :started (-> @app-state :state))
+                   :disabled (some (hash-set (-> @app-state :state)) [:started :reset])
+                   :on-click #(evolve)}]
+          [:input {:type "button" :value "Stop"
+                   :disabled (not (some (hash-set (-> @app-state :state)) [:started]))
+                   :on-click #(stop)}]])})))
 
 
 (defn starter []
