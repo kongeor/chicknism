@@ -1,21 +1,19 @@
 (ns chicknism.core
     (:require [reagent.core :as reagent :refer [atom]]
               [chickn.core :as chickn]
-              [chickn.util :refer [noop simple-printer]]))
+              [chickn.util :refer [noop simple-printer]]
+              [chickn.math :refer [rnd-index]]))
 
 (enable-console-print!)
 
-
-;; state
+;; ------------------------
+;; state + state + helpers
 
 (declare app-state)
 
 (defn rand-chromo []
   (let [chickn-cities (mapv (fn [[n [x y]]] {:name n :x x :y y}) (-> @app-state :cities))]
     (shuffle chickn-cities)))
-
-(defn rnd-index [coll]
-  (int (* (rand) (count coll))))
 
 (defn dist-squared [[{x1 :x y1 :y} {x2 :x y2 :y}]]
   (let [dx (- x1 x2)
@@ -31,8 +29,9 @@
                           :path []
                           :token nil
                           :state :reset
+                          :cities-cnt 50
                           :cfg #:chickn.core{:chromo-gen rand-chromo
-                                             :pop-size     300
+                                             :pop-size     100
                                              :terminated? noop
                                              ;:monitor     monitor
                                              :monitor     noop
@@ -48,7 +47,7 @@
                                                                              :random-func rand}]
                                              :operators    [#:chickn.operators{:type         :chickn.operators/ordered-crossover
                                                                                :rate         0.3
-                                                                               :random-point (partial rnd-index (range 8))
+                                                                               :random-point rnd-index
                                                                                :rand-nth     rand-nth}
                                                             #:chickn.operators{:type        :chickn.operators/swap-mutation
                                                                                :rate        0.1
@@ -57,36 +56,13 @@
 
 ;; chickn stuff
 
-#_(def cities [{:name :A :x 1 :y 1}
-             {:name :B :x 5 :y 1}
-             {:name :C :x 10 :y 1}
-             {:name :D :x 10 :y 5}
-             {:name :E :x 10 :y 10}
-             {:name :F :x 5 :y 10}
-             {:name :G :x 1 :y 10}
-             {:name :H :x 1 :y 5}])
-
-#_(defn init-pop [n]
-    (repeatedly n #(shuffle cities)))
-
-(defn init-pop [n]
-  (repeatedly n rand-chromo))
-
-(defn data-reporter [{:keys [iteration best-fitness best-chromo]}]
-  (let [best-path (mapv :name best-chromo)]
-    (println "Iteration: " iteration " Best fitness: " best-fitness)
-    (if (= (mod iteration 20) 0)
-      (swap! app-state assoc :path best-path))))
-
 (defn evolve-once []
   (let [[_ new-gen] (chickn.core/evolve (-> @app-state :cfg) (-> @app-state :genotype))
         new-path (mapv :name (-> new-gen :best-chromo))]
     (swap! app-state assoc :genotype new-gen :path new-path)))
 
 (defn evolve []
-  (swap! app-state assoc :token (js/setInterval evolve-once 1) :state :started)
-  #_(let [genotype (chickn/init cfg)]
-    (select-keys (chickn/evolve cfg genotype 500) [:solved? :time])))
+  (swap! app-state assoc :token (js/setInterval evolve-once 1) :state :started))
 
 (defn stop []
   (js/clearInterval (-> @app-state :token))
@@ -96,8 +72,8 @@
 ;; ------------
 ;; webapp stuff
 
-(def width-max 760)
-(def height-max 650)
+(def width-max 850)
+(def height-max 450)
 
 (defn create-cities [n]
   (into [] (take n  (map #(keyword (str "c" %)) (range)))))
@@ -110,8 +86,8 @@
 (defn reset []
   (swap! app-state assoc :state :reset :genotype {} :cities {} :path []))
 
-(defn init [n]
-  (let [cities (create-cities n)
+(defn init []
+  (let [cities (create-cities (-> @app-state :cities-cnt))
         _ (swap! app-state assoc :cities (reduce (fn [a c] (merge (create-city-points c) a)) {} cities))
         _ (swap! app-state assoc :path cities)
         genotype (chickn.core/init (-> @app-state :cfg))]
@@ -147,9 +123,46 @@
             (draw-line canvas c1 c2)) path-pairs)))
 
 
-(defn path-shuffler []
-  (js/setInterval
-    #(swap! app-state update-in [:path] shuffle) 100))
+(defn slider [label param-path min max rate]
+  (let [val (get-in (-> @app-state) param-path)
+        val (if rate (* val 100) val)]
+    [:div (str label " " val (if rate " %" ""))
+     [:input {:type "range" :value val :min min :max max
+              :style {:width "100%"}
+              :on-change (fn [e]
+                           (swap! app-state assoc-in param-path
+                                  (let [val (int (.. e -target -value))]
+                                    (if rate
+                                      (/ val 100)
+                                      val))))}]
+     [:br]
+     [:br]]))
+
+(defn control-panel []
+  [:div
+   [:input {:type "button" :value "Reset"
+            :disabled (not (some (hash-set (-> @app-state :state)) [:stopped]))
+            :on-click #(reset)}]
+   [:input {:type "button" :value "Init"
+            :disabled (not (some (hash-set (-> @app-state :state)) [:reset]))
+            :on-click #(init)}]
+   [:input {:type "button" :value "Evolve once"
+            :disabled (some (hash-set (-> @app-state :state)) [:started :reset])
+            :on-click #(evolve-once)}]
+   [:input {:type "button" :value "Start"
+            :disabled (some (hash-set (-> @app-state :state)) [:started :reset])
+            :on-click #(evolve)}]
+   [:input {:type "button" :value "Stop"
+            :disabled (not (some (hash-set (-> @app-state :state)) [:started]))
+            :on-click #(stop)}]])
+
+(defn cfg-controls []
+  [:div {:style {:width width-max}}
+   [slider "Cities " [:cities-cnt] 10 300]
+   [slider "Population size" [:cfg :chickn.core/pop-size] 10 1000]
+   [slider "Elitism rate" [:cfg :chickn.core/selectors 0 :chickn.selectors/rate] 0 100 :rate]
+   [slider "Crossover rate" [:cfg :chickn.core/operators 0 :chickn.operators/rate] 0 100 :rate]
+   [slider "Mutation rate" [:cfg ::chickn/operators 1 :chickn.operators/rate] 0 100 :rate]])
 
 (defn div-with-canvas []
   (let [dom-node (reagent/atom nil)]
@@ -160,10 +173,7 @@
 
        :component-did-mount
        (fn [this]
-         #_(init 50)                                           ; hack!
-         #_(path-shuffler)
-         (reset! dom-node (reagent/dom-node this))
-         )
+         (reset! dom-node (reagent/dom-node this)))
 
        :reagent-render
        (fn []
@@ -172,40 +182,26 @@
           [:canvas (if-let [node @dom-node]
                      {:width (.-clientWidth node)
                       :height (.-clientHeight node)})]
-          [:div
-           [:p "Iteration: " (-> @app-state :genotype :iteration)]
-           [:p "Best fitness: " (-> @app-state :genotype :best-fitness)]]
-          [:input {:type "button" :value "Reset"
-                   :disabled (not (some (hash-set (-> @app-state :state)) [:stopped]))
-                   :on-click #(reset)}]
-          [:input {:type "button" :value "Init"
-                   :disabled (not (some (hash-set (-> @app-state :state)) [:reset]))
-                   :on-click #(init 50)}]
-          [:input {:type "button" :value "Evolve once"
-                   ; :disabled (not= :started (-> @app-state :state))
-                   :on-click #(evolve-once)}]
-          [:input {:type "button" :value "Start"
-                   ;:disabled (not= :started (-> @app-state :state))
-                   :disabled (some (hash-set (-> @app-state :state)) [:started :reset])
-                   :on-click #(evolve)}]
-          [:input {:type "button" :value "Stop"
-                   :disabled (not (some (hash-set (-> @app-state :state)) [:started]))
-                   :on-click #(stop)}]])})))
 
 
-(defn starter []
-  (js/setInterval #(println "secondo") 1000))
+          ])})))
 
-(defn div-with-canvas2 []
-  (let [dom-node (reagent/atom nil)]
-    (fn []
-      (starter)
-      [:div "yo"])))
+(defn wrapper []
+  [:div
+   [:p "Solving the Traveling Salesman Problem using the "
+    [:a {:href "https://github.com/kongeor/chickn"} "chickn"] " library"]
+   [control-panel]
+   [:div
+    [:p "Iteration: " (-> @app-state :genotype :iteration)]
+    [:p "Best fitness: " (-> @app-state :genotype :best-fitness)]]
+   [div-with-canvas]
+   [cfg-controls]]
+  )
 
 (defn on-window-resize [evt]
   (reset! window-width (.-innerWidth js/window)))
 
-(reagent/render [div-with-canvas]
+(reagent/render [wrapper]
                 (. js/document (getElementById "app"))
                 (.addEventListener js/window "resize" on-window-resize))
 
