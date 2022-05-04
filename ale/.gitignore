@@ -1,4 +1,7 @@
 .idea/
 *.iml
 
+.nrepl-port
+
 resources/
+classes/
